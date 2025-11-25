@@ -8,11 +8,11 @@ Pour chaque sous-dossier:
  - extrait un ID YouTube (dernier motif de 11 chars [A-Za-z0-9_-]{11} ou dernier token trouvé)
  - vérifie (optionnel) présence dans archive.txt (lu à chaque fichier)
  - vérifie done.txt (par dossier) pour ne pas re-traiter
- - si output existe et ID absent de done.txt -> supprime output et reconvertit
+ - si output existe et ID/nom absent de done.txt -> supprime output et reconvertit
  - vérifie via ffprobe si vidéo est déjà en AV1 (copie alors)
  - lance ffmpeg avec les bons arguments pour av1_amf (AMD) ou av1_nvenc (NVIDIA)
  - calcule target bitrate = 70% du bitrate vidéo source (kb/s) et l'utilise via -b:v / -maxrate / -bufsize
- - écrit l'ID dans done.txt après succès
+ - écrit l'ID ou le nom complet dans done.txt après succès
  - log des erreurs dans convert_errors.log
 
 Dépendances: python3, ffmpeg, ffprobe. colorama optionnel (couleurs).
@@ -113,10 +113,10 @@ def read_done(done_file: Path):
         return set()
 
 
-def append_done(done_file: Path, yt_id: str):
+def append_done(done_file: Path, identifier: str):
     try:
         with done_file.open("a", encoding="utf-8") as f:
-            f.write(yt_id + "\n")
+            f.write(identifier + "\n")
     except Exception as e:
         print(f"{Fore.YELLOW}[{now_str()}] WARNING: impossible d'écrire dans {done_file}: {e}{Style.RESET_ALL}")
 
@@ -258,19 +258,20 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
                  archive_file: Path, check_archive: bool, encoder: str, quality: str, error_log: str):
     fname = file_path.name
 
+    # Extraire l'ID YouTube s'il existe
     yt_id = extract_youtube_id(fname)
-    if not yt_id:
-        print(Fore.WHITE + f"  ⊘ {fname} (ID YouTube introuvable)" + Style.RESET_ALL)
-        log_error(error_log, f"IGNORÉ (ID YouTube introuvable) : {fname}\nSource : {file_path}\nDate : {now_str()}")
-        return "skipped"
 
-    # If output exists and ID not in done -> remove output to force reconversion
+    # Déterminer l'identifiant à utiliser dans done.txt
+    # Si ID YouTube existe: utiliser l'ID, sinon: utiliser le nom complet du fichier
+    identifier = yt_id if yt_id else fname
+
+    # If output exists and identifier not in done -> remove output to force reconversion
     output_file = out_dir / fname
-    if output_file.exists() and yt_id not in done_set:
+    if output_file.exists() and identifier not in done_set:
         try:
             output_file.unlink()
             print(
-                Fore.YELLOW + f"  ! {fname} (output existant supprimé, ID absent de done.txt) -> reconversion" + Style.RESET_ALL)
+                Fore.YELLOW + f"  ! {fname} (output existant supprimé, absent de done.txt) -> reconversion" + Style.RESET_ALL)
         except Exception as e:
             print(Fore.RED + f"  ✗ {fname} (impossible de supprimer output: {e})" + Style.RESET_ALL)
             log_error(error_log,
@@ -278,12 +279,19 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
             return "failed"
 
     # re-check done
-    if yt_id in done_set:
+    if identifier in done_set:
         print(Fore.WHITE + f"  ⊘ {fname} (déjà dans done.txt)" + Style.RESET_ALL)
         return "skipped"
 
-    # check archive live
+    # check archive live UNIQUEMENT si --check-archive est activé ET qu'un ID YouTube existe
     if check_archive:
+        if not yt_id:
+            # Pas d'ID YouTube et --check-archive activé: on skip
+            print(Fore.WHITE + f"  ⊘ {fname} (ID YouTube introuvable, requis pour --check-archive)" + Style.RESET_ALL)
+            log_error(error_log,
+                      f"IGNORÉ (ID YouTube introuvable avec --check-archive) : {fname}\nSource : {file_path}\nDate : {now_str()}")
+            return "skipped"
+
         archive_ids = read_archive_ids(Path(archive_file))
         if yt_id not in archive_ids:
             print(Fore.WHITE + f"  ⊘ {fname} (absent archive)" + Style.RESET_ALL)
@@ -298,13 +306,14 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
     # display file info
     if codec == "av1":
         bitrate_info = f"{src_kb} kb/s" if src_kb else "bitrate inconnu"
-        print(Fore.CYAN + f"  📄 {fname}" + Style.RESET_ALL)
+        id_info = f"ID: {yt_id}" if yt_id else "sans ID YouTube"
+        print(Fore.CYAN + f"  📄 {fname} ({id_info})" + Style.RESET_ALL)
         print(Fore.WHITE + f"     Codec: AV1 | Bitrate: {bitrate_info}" + Style.RESET_ALL)
         try:
             shutil.copy2(str(file_path), str(output_file))
             print(Fore.GREEN + f"  ✓ Copie vers av1/" + Style.RESET_ALL)
-            append_done(done_path, yt_id)
-            done_set.add(yt_id)
+            append_done(done_path, identifier)
+            done_set.add(identifier)
             return "copied"
         except Exception as e:
             print(Fore.RED + f"  ✗ Échec copie: {e}" + Style.RESET_ALL)
@@ -324,8 +333,9 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
         codec_display = codec or "inconnu"
         src_display = f"{src_kb} kb/s" if src_kb else "inconnu"
         target_display = f"{target_kb} kb/s" if target_kb else "auto"
+        id_info = f"ID: {yt_id}" if yt_id else "sans ID YouTube"
 
-        print(Fore.CYAN + f"  📄 {fname}" + Style.RESET_ALL)
+        print(Fore.CYAN + f"  📄 {fname} ({id_info})" + Style.RESET_ALL)
         print(
             Fore.WHITE + f"     Codec: {codec_display} | Source: {src_display} → Cible: {target_display} (70%)" + Style.RESET_ALL)
         print(Fore.YELLOW + f"  → Conversion en cours..." + Style.RESET_ALL, end="")
@@ -342,8 +352,8 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
 
         if cp.returncode == 0:
             print(Fore.GREEN + " ✓ Conversion réussie" + Style.RESET_ALL)
-            append_done(done_path, yt_id)
-            done_set.add(yt_id)
+            append_done(done_path, identifier)
+            done_set.add(identifier)
             return "converted"
         else:
             print(Fore.RED + " ✗ Échec de la conversion" + Style.RESET_ALL)
