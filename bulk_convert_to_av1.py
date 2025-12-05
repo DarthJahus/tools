@@ -381,7 +381,9 @@ def build_ffmpeg_args(encoder: str, quality: str, target_kb: int, input_file: Pa
     args = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats",
         "-i", str(input_file),
-        "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?"
+        "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+        "-map_metadata", "0",
+        "-map_metadata:s:v", "-1"
     ]
 
     if encoder == "amd":
