@@ -121,13 +121,13 @@ class Logger:
     
     def info(self, message: str):
         if self.verbose:
-            print(f"[INFO] {message}")
-        self._write_file(self.log_file, f"INFO: {message}")
-    
+            print(f"   [INFO] {message}")
+        self._write_file(self.log_file, f"INFO:    {message}")
+
     def error(self, message: str):
-        print(f"[ERROR] {message}", file=sys.stderr)
-        self._write_file(self.error_log_file, f"ERROR: {message}")
-    
+        print(f"  [ERROR] {message}", file=sys.stderr)
+        self._write_file(self.error_log_file, f"ERROR:   {message}")
+
     def warning(self, message: str):
         print(f"[WARNING] {message}")
         self._write_file(self.log_file, f"WARNING: {message}")
@@ -357,9 +357,9 @@ def get_info(filepath: Path, logger: Logger) -> Optional[MediaInfo]:
     # VBR/CBR detection
     # ========================================================================
     info.is_vbr = detect_cbr_vbr(filepath)
-    
-    logger.info(f"  → {info}")
-    
+
+    logger.info(f"→ {info}")
+
     return info
 
 
@@ -588,10 +588,10 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # ========================================================================
     if should_transcode_video_reasons or should_transcode_audio_reasons:
         reason_str = '; '.join(should_transcode_video_reasons + should_transcode_audio_reasons)
-        logger.info(f"  → Transcode needed: {reason_str}")
+        logger.info(f"→ Transcode needed: {reason_str}")
         return True, reason_str
-    
-    logger.info(f"  → No transcode needed")
+
+    logger.info(f"→ No transcode needed")
     return False, "already optimal"
 
 
@@ -737,13 +737,13 @@ def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespa
     cmd = build_ffmpeg_command(src, dst, info, args)
     
     if args.verbose:
-        logger.info(f"  → Command: {' '.join(cmd)}")
+        logger.info(f"→ Command: {' '.join(cmd)}")
     
     try:
         result = subprocess.run(cmd, capture_output=False, text=True)
         
         if result.returncode == 0:
-            logger.info(f"  → Success")
+            logger.info(f"→ Success")
             return True
         else:
             logger.error(f"ffmpeg failed with code {result.returncode} for {src}")
@@ -839,28 +839,28 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         
         rel_path_str = str(rel_path.as_posix())
         dst_file = destination / rel_path
-        
-        print(f"\n{'='*80}")
+
+        print(f"\n{'=' * 80}")
         print(f"Processing: {rel_path}")
-        print(f"{'='*80}")
-        
+        print(f"{'=' * 80}")
+
         # Check if already in done.txt
         if rel_path_str in done_set:
             if dst_file.exists():
-                logger.info(f"  → Already in done.txt, skipping")
+                logger.info(f"→ Already in done.txt, skipping")
                 stats['skipped_done'] += 1
                 continue
             else:
-                logger.warning(f"  → In done.txt but destination missing, will re-transcode")
-        
+                logger.warning(f"→ In done.txt but destination missing, will re-transcode")
+
         # If destination exists but not in done.txt, will re-transcode
         if dst_file.exists() and rel_path_str not in done_set:
-            logger.warning(f"  → Destination exists but not in done.txt, will overwrite")
-        
+            logger.warning(f"→ Destination exists but not in done.txt, will overwrite")
+
         # Get media info
         info = get_info(src_file, logger)
         if not info:
-            logger.error(f"  → Cannot extract info, skipping")
+            logger.error(f"→ Cannot extract info, skipping")
             stats['failed'] += 1
             continue
         
@@ -870,14 +870,14 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         if not should_do:
             # Copy file if not exists
             if not dst_file.exists():
-                logger.info(f"  → Copying (no transcode needed)")
+                logger.info(f"→ Copying (no transcode needed)")
                 if not args.dry_run:
                     dst_file.parent.mkdir(parents=True, exist_ok=True)
                     try:
                         import shutil
                         shutil.copy2(src_file, dst_file)
                     except Exception as e:
-                        logger.error(f"  → Copy failed: {e}")
+                        logger.error(f"→ Copy failed: {e}")
                         stats['failed'] += 1
                         continue
             
@@ -910,7 +910,7 @@ def walk_source(args: argparse.Namespace, logger: Logger):
                 src_file = source / rel_path
                 
                 if not src_file.exists():
-                    logger.warning(f"  → Removing {rel_path} (not in source)")
+                    logger.warning(f"→ Removing {rel_path} (not in source)")
                     if not args.dry_run:
                         try:
                             dst_file.unlink()
@@ -920,15 +920,15 @@ def walk_source(args: argparse.Namespace, logger: Logger):
     # ========================================================================
     # SUMMARY
     # ========================================================================
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("SUMMARY")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Total files:        {stats['total']}")
     print(f"Skipped (done):     {stats['skipped_done']}")
     print(f"Skipped (optimal):  {stats['skipped_optimal']}")
     print(f"Transcoded:         {stats['transcoded']}")
     print(f"Failed:             {stats['failed']}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
 
 # ============================================================================
@@ -962,21 +962,16 @@ def main():
     
     # Encoding options
     parser.add_argument("--force-cbr", action="store_true", help="Force CBR encoding")
-    parser.add_argument("--force-codec-video", action="store_true",
-                        help="Force video codec conversion even if source codec is lighter")
-    parser.add_argument("--force-codec-audio", action="store_true",
-                        help="Force audio codec conversion even if source codec is lighter")
-    parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium',
-                        help="Encoding quality preset")
-    parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none',
-                        help="GPU acceleration")
+    parser.add_argument("--force-codec-video", action="store_true", help="Force video codec conversion even if source codec is lighter")
+    parser.add_argument("--force-codec-audio", action="store_true", help="Force audio codec conversion even if source codec is lighter")
+    parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium', help="Encoding quality preset")
+    parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none', help="GPU acceleration")
     
     # Behavior
     parser.add_argument("--dry-run", action="store_true", help="Simulate without actual transcoding")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument("--propagate", action="store_true", 
-                        help="Remove files in destination that don't exist in source")
-    
+    parser.add_argument("--propagate", action="store_true", help="Remove files in destination that don't exist in source")
+
     # Files
     parser.add_argument("--log", help="Log file path")
     parser.add_argument("--error-log", help="Error log file path")
