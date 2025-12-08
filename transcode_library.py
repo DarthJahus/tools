@@ -87,7 +87,12 @@ class MediaInfo:
     width: Optional[int] = None
     height: Optional[int] = None
     duration: Optional[float] = None
-    
+    audio_tracks: Optional[list] = None
+
+    def __post_init__(self):
+        if self.audio_tracks is None:
+            self.audio_tracks = []
+
     def __str__(self):
         return (f"Video: {self.video_codec or 'N/A'} {self.video_bitrate or 'N/A'}kb/s "
                 f"{'VBR' if self.is_vbr else 'CBR'} {self.width or '?'}x{self.height or '?'} | "
@@ -309,31 +314,40 @@ def get_info(filepath: Path, logger: Logger) -> Optional[MediaInfo]:
                 info.video_bitrate = round((size * 8) / (duration * 1000))
     
     # ========================================================================
-    # AUDIO STREAM
+    # AUDIO STREAMS (toutes les pistes)
     # ========================================================================
-    audio_stream = next((s for s in streams if s.get('codec_type') == 'audio'), None)
-    
-    if audio_stream:
-        info.audio_codec = audio_stream.get('codec_name')
-        
-        if 'bit_rate' in audio_stream:
-            info.audio_bitrate = _to_int(audio_stream['bit_rate'])
-            if info.audio_bitrate:
-                info.audio_bitrate = round(info.audio_bitrate / 1000)
-        
-        # Fallback: estimate by codec
-        if not info.audio_bitrate:
-            codec = info.audio_codec.lower() if info.audio_codec else ''
-            channels = audio_stream.get('channels', 2)
+    audio_streams = [s for s in streams if s.get('codec_type') == 'audio']
+    info.audio_tracks = []
+
+    for audio in audio_streams:
+        track = {
+            'stream_index': audio.get('index'),
+            'codec': audio.get('codec_name'),
+            'bitrate': None,
+            'channels': audio.get('channels', 2),
+            'language': audio.get('tags', {}).get('language', 'und'),
+            'default': audio.get('disposition', {}).get('default', 0) == 1
+        }
+
+        if 'bit_rate' in audio:
+            track['bitrate'] = round(_to_int(audio['bit_rate']) / 1000)
+
+        # Estimation si pas de bitrate
+        if not track['bitrate']:
+            codec = track['codec'].lower() if track['codec'] else ''
             if codec in ('aac', 'mp3'):
-                info.audio_bitrate = 128 if channels <= 2 else 256
+                track['bitrate'] = 128 if track['channels'] <= 2 else 256
             elif codec in ('ac3', 'eac3'):
-                info.audio_bitrate = 192 if channels <= 2 else 448
-            elif codec in ('opus', 'vorbis'):
-                info.audio_bitrate = 96 if channels <= 2 else 160
+                track['bitrate'] = 192 if track['channels'] <= 2 else 448
             else:
-                info.audio_bitrate = 192
-    
+                track['bitrate'] = 192
+
+        info.audio_tracks.append(track)
+
+    # Garder les anciennes propriétés pour compatibilité (première piste)
+    if info.audio_tracks:
+        info.audio_codec = info.audio_tracks[0]['codec']
+        info.audio_bitrate = info.audio_tracks[0]['bitrate']
     # ========================================================================
     # DURATION
     # ========================================================================
@@ -394,61 +408,186 @@ def should_transcode_codec(source_codec: str, target_codec: str, hierarchy: list
     return source_rank < target_rank
 
 
+def select_audio_tracks(info: MediaInfo, args: argparse.Namespace) -> list:
+    """
+    Sélectionne les pistes audio à garder selon les critères.
+    Retourne les indices des pistes sélectionnées.
+    """
+    if not info.audio_tracks:
+        return []
+
+    tracks = info.audio_tracks.copy()
+
+    # Si une seule piste, toujours la garder
+    if len(tracks) == 1:
+        return [0]
+
+    # Plusieurs pistes : appliquer les filtres
+
+    # --one-audio-track : garder une seule piste
+    if args.one_audio_track:
+        # Si langue spécifiée, chercher cette langue
+        if args.audio_lang:
+            preferred = [t for t in tracks if t['language'] == args.audio_lang]
+            if preferred:
+                return [info.audio_tracks.index(preferred[0])]
+
+        # Sinon, garder la piste par défaut
+        default = [t for t in tracks if t.get('default')]
+        if default:
+            return [info.audio_tracks.index(default[0])]
+
+        # Sinon, première piste
+        return [0]
+
+    # --audio-lang : filtrer par langue
+    if args.audio_lang:
+        preferred = [t for t in tracks if t['language'] == args.audio_lang]
+        if preferred:
+            tracks = preferred
+        else:
+            # Langue demandée non trouvée : garder la piste par défaut
+            default = [t for t in tracks if t.get('default')]
+            if default:
+                tracks = default
+            else:
+                tracks = [tracks[0]]
+
+    # Retourner les indices originaux
+    return [info.audio_tracks.index(t) for t in tracks]
+
+
 def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) -> Tuple[bool, str]:
     """
     Détermine si le fichier doit être transcodé.
     Retourne (should_transcode: bool, reason: str)
     """
-    reasons = []
-    
-    # VIDEO checks
+    should_transcode_video_reasons = []
+
+    # ========================================================================
+    # VIDEO CHECKS
+    # ========================================================================
     if info.video_bitrate and info.video_bitrate > args.vb:
-        reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
+        should_transcode_video_reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
 
     # VIDEO CODEC check
     if info.video_codec:
         if args.force_codec_video:
-            # Force transcode si codec différent
             if info.video_codec.lower() not in (
-            args.vc.lower(), 'avc' if args.vc == 'h264' else '', 'h265' if args.vc == 'hevc' else ''):
-                reasons.append(f"video codec {info.video_codec} != {args.vc} (forced)")
+                    args.vc.lower(), 'avc' if args.vc == 'h264' else '', 'h265' if args.vc == 'hevc' else ''):
+                should_transcode_video_reasons.append(f"video codec {info.video_codec} != {args.vc} (forced)")
         else:
-            # Transcode uniquement si source plus lourd que target
             if should_transcode_codec(info.video_codec, args.vc, VIDEO_CODEC_HIERARCHY):
                 src_rank = codec_rank(info.video_codec, VIDEO_CODEC_HIERARCHY)
                 tgt_rank = codec_rank(args.vc, VIDEO_CODEC_HIERARCHY)
-                reasons.append(
+                should_transcode_video_reasons.append(
                     f"video codec {info.video_codec} (rank {src_rank}) heavier than {args.vc} (rank {tgt_rank})")
-    
+
     if args.force_cbr and info.is_vbr:
-        reasons.append("VBR → CBR conversion requested")
-    
+        should_transcode_video_reasons.append("VBR → CBR conversion requested")
+
     if info.width and info.width > args.max_width:
-        reasons.append(f"width {info.width} > {args.max_width}")
-    
+        should_transcode_video_reasons.append(f"width {info.width} > {args.max_width}")
+
     if info.height and info.height > args.max_height:
-        reasons.append(f"height {info.height} > {args.max_height}")
-    
-    # AUDIO checks
-    if info.audio_bitrate and info.audio_bitrate > args.ab:
-        reasons.append(f"audio bitrate {info.audio_bitrate} > {args.ab} kb/s")
+        should_transcode_video_reasons.append(f"height {info.height} > {args.max_height}")
 
-    # AUDIO CODEC check
-    if info.audio_codec:
-        if args.force_codec_audio:
-            # Force transcode si codec différent
-            if info.audio_codec.lower() != args.ac.lower():
-                reasons.append(f"audio codec {info.audio_codec} != {args.ac} (forced)")
-        else:
-            # Transcode uniquement si source plus lourd que target
-            if should_transcode_codec(info.audio_codec, args.ac, AUDIO_CODEC_HIERARCHY):
-                src_rank = codec_rank(info.audio_codec, AUDIO_CODEC_HIERARCHY)
-                tgt_rank = codec_rank(args.ac, AUDIO_CODEC_HIERARCHY)
-                reasons.append(
-                    f"audio codec {info.audio_codec} (rank {src_rank}) heavier than {args.ac} (rank {tgt_rank})")
+    # ========================================================================
+    # AUDIO CHECKS
+    # ========================================================================
 
-    if reasons:
-        reason_str = "; ".join(reasons)
+    # Déterminer si on doit vérifier l'audio
+    # On vérifie l'audio SI :
+    # 1. Il y a déjà des raisons vidéo (on transcode de toute façon)
+    # 2. OU --one-audio-track est activé (réduction du nombre de pistes)
+    # 3. OU --force-audio-on-language est activé
+    # 4. OU --force-audio-on-channels est activé
+    should_check_audio = (
+            len(should_transcode_video_reasons) > 0 or
+            args.one_audio_track or
+            args.force_audio_on_language or
+            args.force_audio_on_channels
+    )
+    should_transcode_audio_reasons = []
+
+    if should_check_audio and info.audio_tracks:
+
+        # Sélectionner les pistes qui seront gardées
+        selected_tracks = select_audio_tracks(info, args)
+
+        # ====================================================================
+        # VÉRIFICATION : Réduction du nombre de pistes
+        # ====================================================================
+        if len(info.audio_tracks) > 1 and len(selected_tracks) < len(info.audio_tracks):
+            should_transcode_audio_reasons.append(f"reducing audio tracks from {len(info.audio_tracks)} to {len(selected_tracks)}")
+
+        # ====================================================================
+        # VÉRIFICATION : --one-audio-track avec plusieurs pistes
+        # ====================================================================
+        if args.one_audio_track and len(info.audio_tracks) > 1:
+            should_transcode_audio_reasons.append(f"multiple audio tracks ({len(info.audio_tracks)}) with --one-audio-track")
+
+        # ====================================================================
+        # VÉRIFICATION : Langue demandée n'existe pas + force
+        # ====================================================================
+        if args.audio_lang and args.force_audio_on_language:
+            # Vérifier si la langue demandée existe
+            lang_exists = any(t['language'] == args.audio_lang for t in info.audio_tracks)
+            if not lang_exists and len(info.audio_tracks) > 0:
+                # Langue demandée n'existe pas ET on force → transcoder
+                should_transcode_audio_reasons.append(f"audio language '{args.audio_lang}' not found, keeping default track (forced)")
+
+        # ====================================================================
+        # VÉRIFICATION : Langue existe et on filtre
+        # ====================================================================
+        if args.audio_lang and len(info.audio_tracks) > 1:
+            lang_exists = any(t['language'] == args.audio_lang for t in info.audio_tracks)
+            if lang_exists and len(selected_tracks) < len(info.audio_tracks):
+                should_transcode_audio_reasons.append(f"keeping only '{args.audio_lang}' audio track(s)")
+
+        # ====================================================================
+        # VÉRIFICATIONS sur la piste principale qui sera gardée
+        # ====================================================================
+        if selected_tracks:
+            main_track_idx = selected_tracks[0]
+            main_track = info.audio_tracks[main_track_idx]
+
+            # ----------------------------------------------------------------
+            # Bitrate
+            # ----------------------------------------------------------------
+            if main_track['bitrate'] and main_track['bitrate'] > args.ab:
+                should_transcode_audio_reasons.append(f"audio bitrate {main_track['bitrate']} > {args.ab} kb/s")
+
+            # ----------------------------------------------------------------
+            # Codec
+            # ----------------------------------------------------------------
+            if main_track['codec']:
+                if args.force_codec_audio:
+                    # Forcer le codec explicitement demandé
+                    if main_track['codec'].lower() != args.ac.lower():
+                        should_transcode_audio_reasons.append(f"audio codec {main_track['codec']} != {args.ac} (forced)")
+                elif len(should_transcode_video_reasons) > 0 or len(should_transcode_audio_reasons):
+                    # Seulement comparer les "ranks" si on transcode déjà la vidéo ou l'audio
+                    if should_transcode_codec(main_track['codec'], args.ac, AUDIO_CODEC_HIERARCHY):
+                        src_rank = codec_rank(main_track['codec'], AUDIO_CODEC_HIERARCHY)
+                        tgt_rank = codec_rank(args.ac, AUDIO_CODEC_HIERARCHY)
+                        should_transcode_audio_reasons.append(f"audio codec {main_track['codec']} (rank {src_rank}) heavier than {args.ac} (rank {tgt_rank})")
+
+            # ----------------------------------------------------------------
+            # Channels (downmix nécessaire ?)
+            # ----------------------------------------------------------------
+            if args.audio_channels and main_track['channels'] > args.audio_channels:
+                # On ajoute une raison SEULEMENT si :
+                # - On transcode déjà la vidéo (len(reasons) > 0 avant cette vérif)
+                # - OU --force-audio-on-channels est activé
+                if len(should_transcode_audio_reasons) > 0 or args.force_audio_on_channels:
+                    should_transcode_audio_reasons.append(f"audio channels {main_track['channels']} > {args.audio_channels}")
+
+    # ========================================================================
+    # RÉSULTAT
+    # ========================================================================
+    if should_transcode_video_reasons or should_transcode_audio_reasons:
+        reason_str = '; '.join(should_transcode_video_reasons + should_transcode_audio_reasons)
         logger.info(f"  → Transcode needed: {reason_str}")
         return True, reason_str
     
@@ -514,28 +653,59 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
     
     # Pixel format
     cmd.extend(["-pix_fmt", "yuv420p"])
-    
+    # Mapper le flux vidéo explicitement
+    cmd.extend(["-map", "0:v:0"])
+
     # ========================================================================
     # AUDIO ENCODING
     # ========================================================================
-    
-    needs_audio_encode = False
-    if info.audio_codec != args.ac or (info.audio_bitrate and info.audio_bitrate > args.ab):
-        needs_audio_encode = True
-    
-    if needs_audio_encode:
-        audio_encoder = args.ac
-        if args.ac == 'aac':
-            audio_encoder = 'aac'
-        elif args.ac == 'opus':
-            audio_encoder = 'libopus'
-        elif args.ac == 'ac3':
-            audio_encoder = 'ac3'
-        
-        cmd.extend(["-c:a", audio_encoder, "-b:a", f"{args.ab}k"])
+
+    # Sélectionner les pistes à garder
+    selected_tracks = select_audio_tracks(info, args)
+
+    if not selected_tracks:
+        # Pas de piste audio
+        cmd.extend(["-an"])
     else:
-        cmd.extend(["-c:a", "copy"])
-    
+        # Mapper les pistes sélectionnées
+        for idx in selected_tracks:
+            cmd.extend(["-map", f"0:a:{idx}"])
+
+        # Vérifier si downmix nécessaire
+        needs_downmix = False
+        if args.audio_channels:
+            for idx in selected_tracks:
+                track = info.audio_tracks[idx]
+                if track['channels'] > args.audio_channels:
+                    needs_downmix = True
+                    break
+
+        # Vérifier si encodage nécessaire
+        needs_audio_encode = False
+        for idx in selected_tracks:
+            track = info.audio_tracks[idx]
+            if track['codec'] != args.ac or (track['bitrate'] and track['bitrate'] > args.ab) or needs_downmix:
+                needs_audio_encode = True
+                break
+
+        if needs_audio_encode:
+            audio_encoder = 'aac' if args.ac == 'aac' else f"lib{args.ac}"
+            if args.ac == 'opus':
+                audio_encoder = 'libopus'
+
+            cmd.extend(["-c:a", audio_encoder, "-b:a", f"{args.ab}k"])
+
+            # Appliquer le downmix si nécessaire
+            if needs_downmix:
+                if args.audio_channels == 2:
+                    cmd.extend(["-ac", "2"])  # Stéréo
+                elif args.audio_channels == 1:
+                    cmd.extend(["-ac", "1"])  # Mono
+                else:
+                    cmd.extend(["-ac", str(args.audio_channels)])
+        else:
+            cmd.extend(["-c:a", "copy"])
+
     # ========================================================================
     # SUBTITLES & OUTPUT
     # ========================================================================
@@ -780,7 +950,12 @@ def main():
     parser.add_argument("--ac", required=True, choices=['aac', 'opus', 'ac3'], help="Audio codec")
     parser.add_argument("--vb", type=int, required=True, help="Max video bitrate (kb/s)")
     parser.add_argument("--ab", type=int, required=True, help="Max audio bitrate (kb/s)")
-    
+
+    parser.add_argument("--audio-channels", type=int, help="Max number of channels (e.g., 2 for stereo, 6 for 5.1)")
+    parser.add_argument("--audio-lang", help="Preferred audio language (e.g., 'fr', 'en')")
+    parser.add_argument("--one-audio-track", action="store_true", help="Keep only one audio track (triggers transcode if multiple tracks exist)")
+    parser.add_argument("--force-audio-on-language", action="store_true", help="Force audio check even if video doesn't need transcode (language filtering)")
+    parser.add_argument("--force-audio-on-channels", action="store_true", help="Force audio check even if video doesn't need transcode (channel downmix)")
     # Resolution
     parser.add_argument("--max-width", type=int, default=1920, help="Max width (default: 1920)")
     parser.add_argument("--max-height", type=int, default=1080, help="Max height (default: 1080)")
