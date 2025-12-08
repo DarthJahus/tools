@@ -6,6 +6,11 @@ Parcourt récursivement un dossier source, transcode les fichiers vidéo selon d
 spécifiques (bitrate, codec, résolution), et maintient un fichier done.txt pour éviter
 de re-transcoder les fichiers déjà traités.
 
+NOUVEAUTÉ: Copie sélective vidéo/audio selon les besoins
+- Si seul l'audio doit être traité → -c:v copy
+- Si seule la vidéo doit être traitée → -c:a copy
+- Si les deux → transcode complet
+
 Dépendances: python3, ffmpeg, ffprobe
 """
 
@@ -457,15 +462,21 @@ def select_audio_tracks(info: MediaInfo, args: argparse.Namespace) -> list:
     return [info.audio_tracks.index(t) for t in tracks]
 
 
-def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) -> Tuple[bool, str]:
+def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) -> Tuple[bool, bool, str]:
     """
     Détermine si le fichier doit être transcodé.
-    Retourne (should_transcode: bool, reason: str)
+
+    Retourne (should_transcode_video: bool, should_transcode_audio: bool, reason: str)
+
+    - should_transcode_video: True si la vidéo doit être réencodée
+    - should_transcode_audio: True si l'audio doit être réencodé
+    - reason: Description des raisons
     """
     should_transcode_video_reasons = []
+    should_transcode_audio_reasons = []
 
     # ========================================================================
-    # VIDEO CHECKS
+    # EXCEPTION: Skip certain codecs
     # ========================================================================
     class ShouldTranscodeError(Exception):
         pass
@@ -474,10 +485,12 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
         # Whichever reasons, don't transcode the file.
         raise ShouldTranscodeError(f"File encoded with {info.video_codec}")
 
+    # ========================================================================
+    # VIDEO CHECKS
+    # ========================================================================
     if info.video_bitrate and info.video_bitrate > args.vb:
         should_transcode_video_reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
 
-    # VIDEO CODEC check
     if info.video_codec:
         if args.force_codec_video:
             if info.video_codec.lower() not in (
@@ -515,7 +528,6 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
             args.force_audio_on_language or
             args.force_audio_on_channels
     )
-    should_transcode_audio_reasons = []
 
     if should_check_audio and info.audio_tracks:
 
@@ -591,77 +603,96 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
                     should_transcode_audio_reasons.append(f"audio channels {main_track['channels']} > {args.audio_channels}")
 
     # ========================================================================
-    # RÉSULTAT
+    # RÉSULTAT: 3 valeurs
     # ========================================================================
     if should_transcode_video_reasons or should_transcode_audio_reasons:
         reason_str = '; '.join(should_transcode_video_reasons + should_transcode_audio_reasons)
-        logger.info(f"→ Transcode needed: {reason_str}")
-        return True, reason_str
+
+        if should_transcode_video_reasons and should_transcode_audio_reasons:
+            logger.info(f"→ Transcode needed (VIDEO + AUDIO): {reason_str}")
+        elif should_transcode_video_reasons:
+            logger.info(f"→ Transcode needed (VIDEO ONLY): {reason_str}")
+        else:
+            logger.info(f"→ Transcode needed (AUDIO ONLY): {reason_str}")
+
+        return len(should_transcode_video_reasons) > 0, len(should_transcode_audio_reasons) > 0, reason_str
 
     logger.info(f"→ No transcode needed")
-    return False, "already optimal"
+    return False, False, "already optimal"
 
 
 # ============================================================================
 # TRANSCODING
 # ============================================================================
 
-def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace) -> list:
-    """Construit la commande ffmpeg selon les paramètres"""
-    
+def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace, transcode_video: bool, transcode_audio: bool) -> list:
+    """
+    Construit la commande ffmpeg selon les paramètres.
+
+    Args:
+        transcode_video: Si False, la vidéo sera copiée (-c:v copy)
+        transcode_audio: Si False, l'audio sera copié (-c:a copy)
+    """
+
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y", "-i", str(src)]
     
     # ========================================================================
     # VIDEO ENCODING
     # ========================================================================
-    
-    # Determine encoder
-    if args.gpu and args.gpu != 'none':
-        encoder = GPU_ENCODERS.get(args.gpu, {}).get(args.vc)
-        if not encoder:
-            encoder = args.vc  # Fallback to software
+
+    if not transcode_video:
+        # COPIE DIRECTE de la vidéo
+        cmd.extend(["-c:v", "copy"])
+        cmd.extend(["-map", "0:v:0"])
     else:
-        encoder = f"lib{args.vc}" if args.vc != 'h264' else 'libx264'
-        if args.vc == 'hevc':
-            encoder = 'libx265'
-        elif args.vc == 'av1':
-            encoder = 'libaom-av1'
-    
-    cmd.extend(["-c:v", encoder])
-    
-    # Preset (only for software encoders)
-    if not args.gpu or args.gpu == 'none':
-        preset = QUALITY_PRESETS.get(args.quality, 'faster')
-        cmd.extend(["-preset", preset])
-    
-    # Bitrate control
-    if args.force_cbr or not info.is_vbr:
-        # CBR mode
-        cmd.extend([
-            "-b:v", f"{args.vb}k",
-            "-maxrate", f"{args.vb}k",
-            "-bufsize", f"{args.vb * 6}k"
-        ])
-    else:
-        # VBR mode
-        cmd.extend(["-b:v", f"{args.vb}k", "-maxrate", f"{int(args.vb * 1.2)}k"])
-    
-    # Resolution scaling
-    scale_filter = None
-    if info.width and info.height:
-        if info.width > args.max_width or info.height > args.max_height:
-            # Calculate scaling keeping aspect ratio
-            scale_w = args.max_width if info.width > args.max_width else -2
-            scale_h = args.max_height if info.height > args.max_height else -2
-            scale_filter = f"scale={scale_w}:{scale_h}"
-    
-    if scale_filter:
-        cmd.extend(["-vf", scale_filter])
-    
-    # Pixel format
-    cmd.extend(["-pix_fmt", "yuv420p"])
-    # Mapper le flux vidéo explicitement
-    cmd.extend(["-map", "0:v:0"])
+        # Transcodage vidéo
+        # Determine encoder
+        if args.gpu and args.gpu != 'none':
+            encoder = GPU_ENCODERS.get(args.gpu, {}).get(args.vc)
+            if not encoder:
+                encoder = args.vc  # Fallback to software
+        else:
+            encoder = f"lib{args.vc}" if args.vc != 'h264' else 'libx264'
+            if args.vc == 'hevc':
+                encoder = 'libx265'
+            elif args.vc == 'av1':
+                encoder = 'libaom-av1'
+
+        cmd.extend(["-c:v", encoder])
+
+        # Preset (only for software encoders)
+        if not args.gpu or args.gpu == 'none':
+            preset = QUALITY_PRESETS.get(args.quality, 'faster')
+            cmd.extend(["-preset", preset])
+
+        # Bitrate control
+        if args.force_cbr or not info.is_vbr:
+            # CBR mode
+            cmd.extend([
+                "-b:v", f"{args.vb}k",
+                "-maxrate", f"{args.vb}k",
+                "-bufsize", f"{args.vb * 6}k"
+            ])
+        else:
+            # VBR mode
+            cmd.extend(["-b:v", f"{args.vb}k", "-maxrate", f"{int(args.vb * 1.2)}k"])
+
+        # Resolution scaling
+        scale_filter = None
+        if info.width and info.height:
+            if info.width > args.max_width or info.height > args.max_height:
+                # Calculate scaling keeping aspect ratio
+                scale_w = args.max_width if info.width > args.max_width else -2
+                scale_h = args.max_height if info.height > args.max_height else -2
+                scale_filter = f"scale={scale_w}:{scale_h}"
+
+        if scale_filter:
+            cmd.extend(["-vf", scale_filter])
+
+        # Pixel format
+        cmd.extend(["-pix_fmt", "yuv420p"])
+        # Mapper le flux vidéo explicitement
+        cmd.extend(["-map", "0:v:0"])
 
     # ========================================================================
     # AUDIO ENCODING
@@ -673,8 +704,13 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
     if not selected_tracks:
         # Pas de piste audio
         cmd.extend(["-an"])
+    elif not transcode_audio:
+        # COPIE DIRECTE de l'audio (toutes les pistes sélectionnées)
+        for idx in selected_tracks:
+            cmd.extend(["-map", f"0:a:{idx}"])
+        cmd.extend(["-c:a", "copy"])
     else:
-        # Mapper les pistes sélectionnées
+        # Remuxing/Transcodage audio
         for idx in selected_tracks:
             cmd.extend(["-map", f"0:a:{idx}"])
 
@@ -727,12 +763,19 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
     return cmd
 
 
-def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace, logger: Logger) -> bool:
-    """
-    Transcode un fichier. Retourne True si succès, False sinon.
-    """
-    logger.info(f"Transcoding: {src.name} → {dst.name}")
-    
+def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace, logger: Logger, transcode_video: bool, transcode_audio: bool) -> bool:
+    """Transcode un fichier. Retourne True si succès, False sinon."""
+
+    # Message descriptif
+    if transcode_video and transcode_audio:
+        logger.info(f"Transcoding (video+audio): {src.name} → {dst.name}")
+    elif transcode_video:
+        logger.info(f"Transcoding (video only, audio copy): {src.name} → {dst.name}")
+    elif transcode_audio:
+        logger.info(f"Remuxing (audio only, video copy): {src.name} → {dst.name}")
+    else:
+        logger.info(f"Copying: {src.name} → {dst.name}")
+
     if args.dry_run:
         logger.info("  → DRY RUN: skipping actual transcode")
         return True
@@ -741,8 +784,8 @@ def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespa
     dst.parent.mkdir(parents=True, exist_ok=True)
     
     # Build command
-    cmd = build_ffmpeg_command(src, dst, info, args)
-    
+    cmd = build_ffmpeg_command(src, dst, info, args, transcode_video, transcode_audio)
+
     if args.verbose:
         logger.info(f"→ Command: {' '.join(cmd)}")
     
@@ -831,7 +874,9 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         'total': len(all_videos),
         'skipped_done': 0,
         'skipped_optimal': 0,
-        'transcoded': 0,
+        'transcoded_both': 0,
+        'transcoded_video': 0,
+        'transcoded_audio': 0,
         'failed': 0
     }
     
@@ -873,13 +918,13 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         
         # Decide if transcode needed
         try:
-            should_do, reason = should_transcode(info, args, logger)
+            transcode_video, transcode_audio, reason = should_transcode(info, args, logger)
         except Exception as e:
             logger.error(f"→ Skipped: {e}")
             stats["failed"] += 1
             continue
 
-        if not should_do:
+        if not transcode_video and not transcode_audio:
             # Copy file if not exists
             if not dst_file.exists():
                 logger.info(f"→ Copying (no transcode needed)")
@@ -898,10 +943,15 @@ def walk_source(args: argparse.Namespace, logger: Logger):
             continue
         
         # Transcode
-        success = transcode_file(src_file, dst_file, info, args, logger)
-        
+        success = transcode_file(src_file, dst_file, info, args, logger, transcode_video, transcode_audio)
+
         if success:
-            stats['transcoded'] += 1
+            if transcode_video and transcode_audio:
+                stats['transcoded_both'] += 1
+            elif transcode_video:
+                stats['transcoded_video'] += 1
+            else:
+                stats['transcoded_audio'] += 1
             append_to_done_file(done_file, rel_path_str)
         else:
             stats['failed'] += 1
@@ -927,19 +977,18 @@ def walk_source(args: argparse.Namespace, logger: Logger):
                         try:
                             dst_file.unlink()
                         except Exception as e:
-                            logger.error(f"  → Cannot remove {dst_file}: {e}")
-    
-    # ========================================================================
-    # SUMMARY
-    # ========================================================================
+                            logger.error(f"→ Cannot remove {dst_file}: {e}")
+
     print(f"\n{'=' * 80}")
     print("SUMMARY")
     print(f"{'=' * 80}")
-    print(f"Total files:        {stats['total']}")
-    print(f"Skipped (done):     {stats['skipped_done']}")
-    print(f"Skipped (optimal):  {stats['skipped_optimal']}")
-    print(f"Transcoded:         {stats['transcoded']}")
-    print(f"Failed:             {stats['failed']}")
+    print(f"Total files:              {stats['total']}")
+    print(f"Skipped (done):           {stats['skipped_done']}")
+    print(f"Skipped (optimal):        {stats['skipped_optimal']}")
+    print(f"Transcoded (video+audio): {stats['transcoded_both']}")
+    print(f"Transcoded (video only):  {stats['transcoded_video']}")
+    print(f"Transcoded (audio only):  {stats['transcoded_audio']}")
+    print(f"Failed:                   {stats['failed']}")
     print(f"{'=' * 80}")
 
 
@@ -978,8 +1027,7 @@ def main():
     parser.add_argument("--force-codec-audio", action="store_true", help="Force audio codec conversion even if source codec is lighter")
     parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium', help="Encoding quality preset")
     parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none', help="GPU acceleration")
-    parser.add_argument("--skip-codec", choices=['av1'], default="av1",
-                        help="Skip file when encoded with... (default: AV1)")
+    parser.add_argument("--skip-codec", choices=['av1'], default="av1", help="Skip file when encoded with... (default: AV1)")
 
     # Behavior
     parser.add_argument("--dry-run", action="store_true", help="Simulate without actual transcoding")
