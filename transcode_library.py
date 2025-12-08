@@ -44,6 +44,33 @@ GPU_ENCODERS = {
     }
 }
 
+# Hiérarchie des codecs vidéo (du plus lourd au plus léger pour le décodage)
+VIDEO_CODEC_HIERARCHY = [
+    'av1',                                       # Très lourd
+    'hevc', 'h265',                              # Lourd
+    'vp9',                                       # Lourd
+    'h264', 'avc',                               # Moyen (standard actuel)
+    'vp8',                                       # Léger
+    'vc1', 'wmv3',                               # Léger
+    'mpeg2video',                                # Très léger
+    'h263', 'h263p',                             # Très léger
+    'mpeg4', 'msmpeg4', 'msmpeg4v2', 'msmpeg4v3' # Très léger
+]
+
+# Hiérarchie des codecs audio (du plus lourd au plus léger pour le décodage)
+AUDIO_CODEC_HIERARCHY = [
+    'truehd', 'dts', 'dts-hd',                  # Très lourd
+    'flac',                                     # Lourd (lossless)
+    'opus',                                     # Moyen-léger
+    'eac3',                                     # Moyen
+    'ac3',                                      # Moyen-léger
+    'aac',                                      # Léger (standard actuel)
+    'mp3',                                      # Très léger
+    'vorbis', 'ogg',                            # Léger
+    'wmav2',                                    # Très léger
+    'mp2'                                       # Très léger
+]
+
 
 # ============================================================================
 # DATA STRUCTURES
@@ -326,6 +353,47 @@ def get_info(filepath: Path, logger: Logger) -> Optional[MediaInfo]:
 # DECISION LOGIC
 # ============================================================================
 
+def codec_rank(codec: str, hierarchy: list) -> int:
+    """
+    Retourne le rang d'un codec dans la hiérarchie.
+    Moins le rang est élevé, meilleur est le codec.
+    Retourne -1 si codec inconnu.
+    """
+    if not codec:
+        return -1
+
+    codec_lower = codec.lower()
+
+    # Normalisation des alias
+    if codec_lower in ('h264', 'avc'):
+        codec_lower = 'h264'
+    elif codec_lower in ('hevc', 'h265'):
+        codec_lower = 'hevc'
+
+    try:
+        return hierarchy.index(codec_lower)
+    except ValueError:
+        return -1
+
+
+def should_transcode_codec(source_codec: str, target_codec: str, hierarchy: list) -> bool:
+    """
+    Retourne True si le codec source est inférieur au codec cible dans la hiérarchie.
+    Si le codec source est supérieur ou égal, retourne False (pas besoin de transcoder).
+    """
+    source_rank = codec_rank(source_codec, hierarchy)
+    target_rank = codec_rank(target_codec, hierarchy)
+
+    # Si l'un des codecs est inconnu, on transcode par sécurité
+    if source_rank == -1:
+        return True  # Codec source inconnu → transcoder
+    if target_rank == -1:
+        return False  # Codec cible inconnu → ne pas transcoder
+
+    # Transcoder uniquement si source < target
+    return source_rank < target_rank
+
+
 def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) -> Tuple[bool, str]:
     """
     Détermine si le fichier doit être transcodé.
@@ -336,9 +404,21 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # VIDEO checks
     if info.video_bitrate and info.video_bitrate > args.vb:
         reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
-    
-    if info.video_codec and info.video_codec != args.vc:
-        reasons.append(f"video codec {info.video_codec} != {args.vc}")
+
+    # VIDEO CODEC check
+    if info.video_codec:
+        if args.force_codec_video:
+            # Force transcode si codec différent
+            if info.video_codec.lower() not in (
+            args.vc.lower(), 'avc' if args.vc == 'h264' else '', 'h265' if args.vc == 'hevc' else ''):
+                reasons.append(f"video codec {info.video_codec} != {args.vc} (forced)")
+        else:
+            # Transcode uniquement si source plus lourd que target
+            if should_transcode_codec(info.video_codec, args.vc, VIDEO_CODEC_HIERARCHY):
+                src_rank = codec_rank(info.video_codec, VIDEO_CODEC_HIERARCHY)
+                tgt_rank = codec_rank(args.vc, VIDEO_CODEC_HIERARCHY)
+                reasons.append(
+                    f"video codec {info.video_codec} (rank {src_rank}) heavier than {args.vc} (rank {tgt_rank})")
     
     if args.force_cbr and info.is_vbr:
         reasons.append("VBR → CBR conversion requested")
@@ -352,10 +432,21 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # AUDIO checks
     if info.audio_bitrate and info.audio_bitrate > args.ab:
         reasons.append(f"audio bitrate {info.audio_bitrate} > {args.ab} kb/s")
-    
-    if info.audio_codec and info.audio_codec != args.ac:
-        reasons.append(f"audio codec {info.audio_codec} != {args.ac}")
-    
+
+    # AUDIO CODEC check
+    if info.audio_codec:
+        if args.force_codec_audio:
+            # Force transcode si codec différent
+            if info.audio_codec.lower() != args.ac.lower():
+                reasons.append(f"audio codec {info.audio_codec} != {args.ac} (forced)")
+        else:
+            # Transcode uniquement si source plus lourd que target
+            if should_transcode_codec(info.audio_codec, args.ac, AUDIO_CODEC_HIERARCHY):
+                src_rank = codec_rank(info.audio_codec, AUDIO_CODEC_HIERARCHY)
+                tgt_rank = codec_rank(args.ac, AUDIO_CODEC_HIERARCHY)
+                reasons.append(
+                    f"audio codec {info.audio_codec} (rank {src_rank}) heavier than {args.ac} (rank {tgt_rank})")
+
     if reasons:
         reason_str = "; ".join(reasons)
         logger.info(f"  → Transcode needed: {reason_str}")
@@ -696,6 +787,10 @@ def main():
     
     # Encoding options
     parser.add_argument("--force-cbr", action="store_true", help="Force CBR encoding")
+    parser.add_argument("--force-codec-video", action="store_true",
+                        help="Force video codec conversion even if source codec is lighter")
+    parser.add_argument("--force-codec-audio", action="store_true",
+                        help="Force audio codec conversion even if source codec is lighter")
     parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium',
                         help="Encoding quality preset")
     parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none',
