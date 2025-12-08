@@ -467,6 +467,13 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # ========================================================================
     # VIDEO CHECKS
     # ========================================================================
+    class ShouldTranscodeError(Exception):
+        pass
+
+    if info.video_codec in args.skip_codec:
+        # Whichever reasons, don't transcode the file.
+        raise ShouldTranscodeError(f"File encoded with {info.video_codec}")
+
     if info.video_bitrate and info.video_bitrate > args.vb:
         should_transcode_video_reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
 
@@ -865,8 +872,13 @@ def walk_source(args: argparse.Namespace, logger: Logger):
             continue
         
         # Decide if transcode needed
-        should_do, reason = should_transcode(info, args, logger)
-        
+        try:
+            should_do, reason = should_transcode(info, args, logger)
+        except Exception as e:
+            logger.error(f"→ Skipped: {e}")
+            stats["failed"] += 1
+            continue
+
         if not should_do:
             # Copy file if not exists
             if not dst_file.exists():
@@ -966,7 +978,9 @@ def main():
     parser.add_argument("--force-codec-audio", action="store_true", help="Force audio codec conversion even if source codec is lighter")
     parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium', help="Encoding quality preset")
     parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none', help="GPU acceleration")
-    
+    parser.add_argument("--skip-codec", choices=['av1'], default="av1",
+                        help="Skip file when encoded with... (default: AV1)")
+
     # Behavior
     parser.add_argument("--dry-run", action="store_true", help="Simulate without actual transcoding")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
@@ -983,13 +997,14 @@ def main():
     logger = Logger(log_file=args.log, error_log_file=args.error_log, verbose=args.verbose)
     
     logger.info(f"Starting transcode job")
-    logger.info(f"  Source: {args.source}")
-    logger.info(f"  Destination: {args.destination}")
-    logger.info(f"  Video: {args.vc} @ {args.vb} kb/s, max {args.max_width}x{args.max_height}")
-    logger.info(f"  Audio: {args.ac} @ {args.ab} kb/s")
-    logger.info(f"  Quality: {args.quality}, GPU: {args.gpu}, Force CBR: {args.force_cbr}")
-    logger.info(f"  Dry run: {args.dry_run}, Propagate: {args.propagate}")
-    
+    logger.info(f"Source: {args.source}")
+    logger.info(f"Destination: {args.destination}")
+    logger.info(f"Video: {args.vc} @ {args.vb} kb/s, max {args.max_width}x{args.max_height}")
+    logger.info(f"Audio: {args.ac} @ {args.ab} kb/s")
+    logger.info(f"Quality: {args.quality}, GPU: {args.gpu}, Force CBR: {args.force_cbr}")
+    logger.info(f"Skip files with: {args.skip_codec}")
+    logger.info(f"Dry run: {args.dry_run}, Propagate: {args.propagate}")
+
     # Execute
     try:
         walk_source(args, logger)
