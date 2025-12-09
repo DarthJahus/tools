@@ -1032,7 +1032,8 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         dst_file = destination / rel_path
 
         print(f"\n{'=' * 80}")
-        print(f"Processing: {rel_path}")
+        logger.info(f"\n\n• Processing file {all_videos.index(src_file) + 1}/{len(all_videos)}...")
+        print(f"{rel_path}")
         print(f"{'=' * 80}")
 
         # Check if already in done.txt
