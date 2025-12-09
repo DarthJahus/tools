@@ -384,10 +384,12 @@ def codec_rank(codec: str, hierarchy: list) -> int:
     codec_lower = codec.lower()
 
     # Normalisation des alias
-    if codec_lower in ('h264', 'avc'):
+    if codec_lower in ('h264', 'avc', 'h264_cuvid'):
         codec_lower = 'h264'
-    elif codec_lower in ('hevc', 'h265'):
+    elif codec_lower in ('hevc', 'h265', 'hevc_cuvid'):
         codec_lower = 'hevc'
+    elif codec_lower in ('vp9', 'vp09'):
+        codec_lower = 'vp9'
 
     try:
         return hierarchy.index(codec_lower)
@@ -1094,7 +1096,7 @@ def main():
     parser.add_argument("--force-codec-audio", action="store_true", help="Force audio codec conversion even if source codec is lighter")
     parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium', help="Encoding quality preset")
     parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none', help="GPU acceleration")
-    parser.add_argument("--skip-codec", choices=['av1'], default="av1", help="Skip file when encoded with... (default: AV1)")
+    parser.add_argument("--skip-codec", choices=['av1','h265','vp9'], action="append", default=[], help="Skip file when encoded with these codecs.")
 
     # Behavior
     parser.add_argument("--dry-run", action="store_true", help="Simulate without actual transcoding")
