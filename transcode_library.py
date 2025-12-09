@@ -425,11 +425,11 @@ def calculate_ideal_bitrate(source_codec: str, source_bitrate: int, target_codec
     codec_efficiency = {
         'h264': 1.0,
         'avc': 1.0,
-        'hevc': 0.5,        # HEVC = 2x plus efficace
-        'h265': 0.5,
-        'av1': 0.4,         # AV1 = 2.5x plus efficace
-        'vp9': 0.55,        # VP9 ≈ 1.8x plus efficace
-        'mpeg2video': 1.5,  # MPEG2 = moins efficace
+        'hevc': 0.65,          # Gain de 35% seulement
+        'h265': 0.65,
+        'av1': 0.55,           # Gain de 45% seulement
+        'vp9': 0.70,           # Gain de 30% seulement
+        'mpeg2video': 1.5,
         'mpeg4': 1.2,
         'vc1': 1.3,
         'wmv3': 1.3
