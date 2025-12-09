@@ -445,6 +445,61 @@ def calculate_ideal_bitrate(source_codec: str, source_bitrate: int, target_codec
     return int(source_bitrate * (tgt_efficiency / src_efficiency))
 
 
+def compute_target_resolution(src_w, src_h, max_w, max_h):
+    """
+    Retourne la résolution finale après application de max_width / max_height
+    en conservant le ratio original.
+    Si max_w ou max_h vaut None, uniquement l'autre limite est utilisée.
+    """
+    # Si aucune contrainte : retour source
+    if max_w is None and max_h is None:
+        return src_w, src_h
+
+    # Ratio d’origine
+    src_ratio = src_w / src_h
+
+    # On choisit le dimensionnement selon la contrainte la plus stricte
+    if max_w is not None and max_h is not None:
+        # Calcul des résolutions possibles
+        w_based_h = int(max_w / src_ratio)
+        h_based_w = int(max_h * src_ratio)
+
+        if w_based_h <= max_h:
+            # Limite définie par la largeur
+            return max_w, w_based_h
+        else:
+            # Limite définie par la hauteur
+            return h_based_w, max_h
+
+    elif max_w is not None:
+        # Seulement limite largeur
+        new_h = int(max_w / src_ratio)
+        return max_w, new_h
+
+    else:
+        # Seulement limite hauteur
+        new_w = int(max_h * src_ratio)
+        return new_w, max_h
+
+
+def scale_bitrate_for_resolution(bitrate: int, source_w: int, source_h: int, target_w: int, target_h: int) -> int:
+    """
+    Ajuste un bitrate en fonction du changement de résolution.
+    Formule : bitrate × (pixels_target / pixels_source)
+    """
+    if not (source_w and source_h and target_w and target_h):
+        return bitrate
+
+    src_pixels = source_w * source_h
+    dst_pixels = target_w * target_h
+
+    if src_pixels <= 0:
+        return bitrate
+
+    ratio = dst_pixels / src_pixels
+    return int(bitrate * ratio)
+
+
 def select_audio_tracks(info: MediaInfo, args: argparse.Namespace) -> list:
     """
     Sélectionne les pistes audio à garder selon les critères.
@@ -494,6 +549,10 @@ def select_audio_tracks(info: MediaInfo, args: argparse.Namespace) -> list:
     return [info.audio_tracks.index(t) for t in tracks]
 
 
+class ShouldTranscodeError(Exception):
+    pass
+
+
 def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) -> Tuple[bool, bool, str]:
     """
     Détermine si le fichier doit être transcodé.
@@ -510,9 +569,6 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # ========================================================================
     # EXCEPTION: Skip certain codecs
     # ========================================================================
-    class ShouldTranscodeError(Exception):
-        pass
-
     if info.video_codec in args.skip_codec:
         # Whichever reasons, don't transcode the file.
         raise ShouldTranscodeError(f"File encoded with {info.video_codec}")
@@ -523,6 +579,13 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     if info.video_bitrate and info.video_codec:
         # Calculer le bitrate idéal pour le changement de codec
         ideal_bitrate = calculate_ideal_bitrate(info.video_codec, info.video_bitrate, args.vc)
+        # Scale ideal bitrate for resolution change
+        target_width, target_height = compute_target_resolution(info.width, info.height, args.max_width, args.max_height)
+        ideal_bitrate = scale_bitrate_for_resolution(
+            ideal_bitrate,
+            info.width, info.height,
+            target_width, target_height
+        )
 
         if args.adaptive_vb:
             # Mode intelligent : utiliser min(ideal, --vb)
@@ -743,11 +806,13 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
         # Resolution scaling
         scale_filter = None
         if info.width and info.height:
-            if info.width > args.max_width or info.height > args.max_height:
-                # Calculate scaling keeping aspect ratio
-                scale_w = args.max_width if info.width > args.max_width else -2
-                scale_h = args.max_height if info.height > args.max_height else -2
-                scale_filter = f"scale={scale_w}:{scale_h}"
+            target_w, target_h = compute_target_resolution(
+                info.width, info.height,
+                args.max_width, args.max_height
+            )
+            # On ne scale que si nécessaire
+            if target_w != info.width or target_h != info.height:
+                scale_filter = f"scale={target_w}:{target_h}"
 
         if scale_filter:
             cmd.extend(["-vf", scale_filter])
@@ -936,18 +1001,19 @@ def walk_source(args: argparse.Namespace, logger: Logger):
                 all_videos.append(Path(root) / file)
     
     logger.info(f"Found {len(all_videos)} video files in source")
-    
+
     # Statistics
     stats = {
         'total': len(all_videos),
         'skipped_done': 0,
         'skipped_optimal': 0,
+        'skipped_codec': 0,
         'transcoded_both': 0,
         'transcoded_video': 0,
         'transcoded_audio': 0,
         'failed': 0
     }
-    
+
     # Process each file
     for src_file in all_videos:
         # Calculate relative path
@@ -987,6 +1053,10 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         # Decide if transcode needed
         try:
             transcode_video, transcode_audio, reason = should_transcode(info, args, logger)
+        except ShouldTranscodeError as e:
+            logger.info(f"→ Skipped: {e}")
+            stats['skipped_codec'] = stats.get('skipped_codec', 0) + 1
+            continue
         except Exception as e:
             logger.error(f"→ Skipped: {e}")
             stats["failed"] += 1
@@ -1053,6 +1123,7 @@ def walk_source(args: argparse.Namespace, logger: Logger):
     print(f"Total files:              {stats['total']}")
     print(f"Skipped (done):           {stats['skipped_done']}")
     print(f"Skipped (optimal):        {stats['skipped_optimal']}")
+    print(f"Skipped (codec):          {stats['skipped_codec']}")
     print(f"Transcoded (video+audio): {stats['transcoded_both']}")
     print(f"Transcoded (video only):  {stats['transcoded_video']}")
     print(f"Transcoded (audio only):  {stats['transcoded_audio']}")
@@ -1109,6 +1180,15 @@ def main():
     parser.add_argument("--done-file", help="Done file path (default: source/done.txt)")
     
     args = parser.parse_args()
+
+    # Validation
+    if args.vb <= 0 or args.ab <= 0:
+        print("Error: Bitrates must be positive", file=sys.stderr)
+        sys.exit(1)
+
+    if args.max_width <= 0 or args.max_height <= 0:
+        print("Error: Resolution must be positive", file=sys.stderr)
+        sys.exit(1)
     
     # Create logger
     logger = Logger(log_file=args.log, error_log_file=args.error_log, verbose=args.verbose)
