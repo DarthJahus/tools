@@ -413,6 +413,36 @@ def should_transcode_codec(source_codec: str, target_codec: str, hierarchy: list
     return source_rank < target_rank
 
 
+def calculate_ideal_bitrate(source_codec: str, source_bitrate: int, target_codec: str) -> int:
+    """
+    Calcule le bitrate idéal pour maintenir la qualité lors d'un changement de codec.
+
+    Retourne le bitrate équivalent dans le codec cible.
+    """
+    # Coefficients d'efficacité relatifs (h264 = baseline 1.0)
+    codec_efficiency = {
+        'h264': 1.0,
+        'avc': 1.0,
+        'hevc': 0.5,        # HEVC = 2x plus efficace
+        'h265': 0.5,
+        'av1': 0.4,         # AV1 = 2.5x plus efficace
+        'vp9': 0.55,        # VP9 ≈ 1.8x plus efficace
+        'mpeg2video': 1.5,  # MPEG2 = moins efficace
+        'mpeg4': 1.2,
+        'vc1': 1.3,
+        'wmv3': 1.3
+    }
+
+    src_codec = source_codec.lower() if source_codec else 'h264'
+    tgt_codec = target_codec.lower()
+
+    src_efficiency = codec_efficiency.get(src_codec, 1.0)
+    tgt_efficiency = codec_efficiency.get(tgt_codec, 1.0)
+
+    # Formule: bitrate_ideal = bitrate_source × (efficiency_target / efficiency_source)
+    return int(source_bitrate * (tgt_efficiency / src_efficiency))
+
+
 def select_audio_tracks(info: MediaInfo, args: argparse.Namespace) -> list:
     """
     Sélectionne les pistes audio à garder selon les critères.
@@ -488,8 +518,37 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # ========================================================================
     # VIDEO CHECKS
     # ========================================================================
-    if info.video_bitrate and info.video_bitrate > args.vb:
-        should_transcode_video_reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
+    if info.video_bitrate and info.video_codec:
+        # Calculer le bitrate idéal pour le changement de codec
+        ideal_bitrate = calculate_ideal_bitrate(info.video_codec, info.video_bitrate, args.vc)
+
+        if args.adaptive_vb:
+            # Mode intelligent : utiliser min(ideal, --vb)
+            effective_vb = min(ideal_bitrate, args.vb)
+
+            if info.video_bitrate > effective_vb:
+                should_transcode_video_reasons.append(
+                    f"video bitrate {info.video_bitrate} > {effective_vb} kb/s "
+                    f"(adaptive: ideal={ideal_bitrate}, requested={args.vb})"
+                )
+        else:
+            # Mode classique : utiliser --vb mais avertir si gonflement
+            if info.video_bitrate > args.vb:
+                should_transcode_video_reasons.append(
+                    f"video bitrate {info.video_bitrate} > {args.vb} kb/s"
+                )
+                if ideal_bitrate < args.vb:
+                    # Avertissement : on va potentiellement gonfler le fichier
+                    logger.warning(
+                        f"Transcoding {info.video_codec} {info.video_bitrate}kb/s → {args.vc} {args.vb}kb/s "
+                        f"may increase file size (ideal: {ideal_bitrate}kb/s). Consider --adaptive-bitrate"
+                    )
+    elif info.video_bitrate:
+        # Pas d'info codec : comportement classique
+        if info.video_bitrate > args.vb:
+            should_transcode_video_reasons.append(
+                f"video bitrate {info.video_bitrate} > {args.vb} kb/s"
+            )
 
     if info.video_codec:
         if args.force_codec_video:
@@ -625,7 +684,7 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
 # TRANSCODING
 # ============================================================================
 
-def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace, transcode_video: bool, transcode_audio: bool) -> list:
+def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace, transcode_video: bool, transcode_audio: bool, effective_vb: int = None) -> list:
     """
     Construit la commande ffmpeg selon les paramètres.
 
@@ -666,16 +725,18 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
             cmd.extend(["-preset", preset])
 
         # Bitrate control
+        vb = effective_vb if effective_vb is not None else args.vb
+
         if args.force_cbr or not info.is_vbr:
             # CBR mode
             cmd.extend([
-                "-b:v", f"{args.vb}k",
-                "-maxrate", f"{args.vb}k",
-                "-bufsize", f"{args.vb * 6}k"
+                "-b:v", f"{vb}k",
+                "-maxrate", f"{vb}k",
+                "-bufsize", f"{vb * 6}k"
             ])
         else:
             # VBR mode
-            cmd.extend(["-b:v", f"{args.vb}k", "-maxrate", f"{int(args.vb * 1.2)}k"])
+            cmd.extend(["-b:v", f"{vb}k", "-maxrate", f"{int(vb * 1.2)}k"])
 
         # Resolution scaling
         scale_filter = None
@@ -784,7 +845,12 @@ def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespa
     dst.parent.mkdir(parents=True, exist_ok=True)
     
     # Build command
-    cmd = build_ffmpeg_command(src, dst, info, args, transcode_video, transcode_audio)
+    effective_vb = args.vb
+    if args.adaptive_vb and info.video_codec and info.video_bitrate:
+        ideal_bitrate = calculate_ideal_bitrate(info.video_codec, info.video_bitrate, args.vc)
+        effective_vb = min(ideal_bitrate, args.vb)
+
+    cmd = build_ffmpeg_command(src, dst, info, args, transcode_video, transcode_audio, effective_vb)
 
     if args.verbose:
         logger.info(f"→ Command: {' '.join(cmd)}")
@@ -1011,6 +1077,7 @@ def main():
     parser.add_argument("--ac", required=True, choices=['aac', 'opus', 'ac3'], help="Audio codec")
     parser.add_argument("--vb", type=int, required=True, help="Max video bitrate (kb/s)")
     parser.add_argument("--ab", type=int, required=True, help="Max audio bitrate (kb/s)")
+    parser.add_argument("--adaptive-vb", action="store_true", help="Adjust target bitrate based on codec efficiency to avoid unnecessary file size increase")
 
     parser.add_argument("--audio-channels", type=int, help="Max number of channels (e.g., 2 for stereo, 6 for 5.1)")
     parser.add_argument("--audio-lang", help="Preferred audio language (e.g., 'fr', 'en')")
