@@ -220,7 +220,7 @@ def get_info(filepath: Path, logger: Logger) -> Optional[MediaInfo]:
     Extrait toutes les informations d'un fichier média avec fallbacks robustes.
     Retourne MediaInfo ou None si échec total.
     """
-    logger.info(f"Analyzing: {filepath.name}")
+    logger.info(f"Analyzing: {path_name(filepath.name)}")
     
     info = MediaInfo()
     
@@ -603,6 +603,7 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
                     f"video bitrate {info.video_bitrate} > {args.vb} kb/s"
                 )
                 if ideal_bitrate < args.vb:
+                    # ToDo: Duplicate; consider removing
                     # Avertissement : on va potentiellement gonfler le fichier
                     logger.warning(
                         f"Transcoding {info.video_codec} {info.video_bitrate}kb/s → {args.vc} {args.vb}kb/s "
@@ -891,18 +892,26 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
     return cmd
 
 
+def path_name(path, min=10, max=50, part1=2, part2=1):
+    _path = str(path)  # Convert to string if of type Path
+    if len(_path) > max:
+        result = f"{_path[:((part1*max//(part1+part2))-3)]}...{_path[(len(_path)-(part2*max//(part1+part2))+3):]}"
+        return result if len(result) > min else _path
+    return _path
+
+
 def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespace, logger: Logger, transcode_video: bool, transcode_audio: bool) -> bool:
     """Transcode un fichier. Retourne True si succès, False sinon."""
 
     # Message descriptif
     if transcode_video and transcode_audio:
-        logger.info(f"Transcoding (video+audio): {src.name} → {dst.name}")
+        logger.info(f"Transcoding (video+audio): {path_name(src.name)} → {path_name(dst.name)}")
     elif transcode_video:
-        logger.info(f"Transcoding (video only, audio copy): {src.name} → {dst.name}")
+        logger.info(f"Transcoding (video only, audio copy): {path_name(src.name)} → {path_name(dst.name)}")
     elif transcode_audio:
-        logger.info(f"Remuxing (audio only, video copy): {src.name} → {dst.name}")
+        logger.info(f"Remuxing (audio only, video copy): {path_name(src.name)} → {path_name(dst.name)}")
     else:
-        logger.info(f"Copying: {src.name} → {dst.name}")
+        logger.info(f"Copying: {path_name(src.name)} → {path_name(dst.name)}")
 
     if args.dry_run:
         logger.info("  → DRY RUN: skipping actual transcode")
@@ -1032,8 +1041,8 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         dst_file = destination / rel_path
 
         print(f"\n{'=' * 80}")
-        logger.info(f"\n\n• Processing file {all_videos.index(src_file) + 1}/{len(all_videos)}...")
-        print(f"{rel_path}")
+        print(f"• Processing file {all_videos.index(src_file) + 1}/{len(all_videos)}...")
+        print(f"  {path_name(rel_path, 20, 80)}")
         print(f"{'=' * 80}")
 
         # Check if already in done.txt
