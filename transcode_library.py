@@ -1199,7 +1199,8 @@ def main():
     logger.info(f"Video: {args.vc} @ {args.vb} kb/s, max {args.max_width}x{args.max_height}")
     logger.info(f"Audio: {args.ac} @ {args.ab} kb/s")
     logger.info(f"Quality: {args.quality}, GPU: {args.gpu}, Force CBR: {args.force_cbr}")
-    logger.info(f"Skip files with: {args.skip_codec}")
+    if args.skip_codec:
+        logger.info(f"Skip files with: {args.skip_codec}")
     logger.info(f"Dry run: {args.dry_run}, Propagate: {args.propagate}")
 
     # Execute
