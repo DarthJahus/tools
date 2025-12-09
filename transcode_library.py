@@ -913,9 +913,14 @@ def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespa
     
     # Build command
     effective_vb = args.vb
-    if args.adaptive_vb and info.video_codec and info.video_bitrate:
+    if info.video_codec and info.video_bitrate:
         ideal_bitrate = calculate_ideal_bitrate(info.video_codec, info.video_bitrate, args.vc)
-        effective_vb = min(ideal_bitrate, args.vb)
+        if ideal_bitrate < args.vb:
+            if args.adaptive_vb:
+                effective_vb = ideal_bitrate
+                logger.info(f'Using bitrate {effective_vb} kb/s instead of user defined {args.vb} kbps.')
+            else:
+                logger.warning(f'User defined bitrate ({args.vb}) higher than ideal (~ {effective_vb}). Process might result in a file larger than necessary. Consider using --adaptive-vb')
 
     cmd = build_ffmpeg_command(src, dst, info, args, transcode_video, transcode_audio, effective_vb)
 
