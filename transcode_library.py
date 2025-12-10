@@ -917,6 +917,18 @@ def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespa
     effective_vb = args.vb
     if info.video_codec and info.video_bitrate:
         ideal_bitrate = calculate_ideal_bitrate(info.video_codec, info.video_bitrate, args.vc)
+
+        # IMPORTANT: Scale ideal bitrate for resolution change (same as in should_transcode)
+        target_width, target_height = compute_target_resolution(
+            info.width, info.height,
+            args.max_width, args.max_height
+        )
+        ideal_bitrate = scale_bitrate_for_resolution(
+            ideal_bitrate,
+            info.width, info.height,
+            target_width, target_height
+        )
+
         if ideal_bitrate < args.vb:
             if args.adaptive_vb:
                 effective_vb = ideal_bitrate
