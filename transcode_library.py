@@ -256,6 +256,13 @@ def get_info(filepath: Path, logger: Logger) -> Optional[MediaInfo]:
     if video_stream:
         # Codec
         info.video_codec = video_stream.get('codec_name')
+        # Normalisation du codec
+        if info.video_codec:
+            codec_lower = info.video_codec.lower()
+            if codec_lower in ('hevc', 'h265'):
+                info.video_codec = 'h265'
+            elif codec_lower in ('h264', 'avc'):
+                info.video_codec = 'h264'
         
         # Resolution
         info.width = video_stream.get('width')
