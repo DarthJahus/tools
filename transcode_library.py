@@ -599,16 +599,8 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
         else:
             # Mode classique : utiliser --vb mais avertir si gonflement
             if info.video_bitrate > args.vb:
-                should_transcode_video_reasons.append(
-                    f"video bitrate {info.video_bitrate} > {args.vb} kb/s"
-                )
-                if ideal_bitrate < args.vb:
-                    # ToDo: Duplicate; consider removing
-                    # Avertissement : on va potentiellement gonfler le fichier
-                    logger.warning(
-                        f"Transcoding {info.video_codec} {info.video_bitrate}kb/s → {args.vc} {args.vb}kb/s "
-                        f"may increase file size (ideal: {ideal_bitrate}kb/s). Consider --adaptive-bitrate"
-                    )
+                should_transcode_video_reasons.append(f"video bitrate {info.video_bitrate} > {args.vb} kb/s")
+
     elif info.video_bitrate:
         # Pas d'info codec : comportement classique
         if info.video_bitrate > args.vb:
@@ -853,6 +845,7 @@ def build_ffmpeg_command(src: Path, dst: Path, info: MediaInfo, args: argparse.N
                     break
 
         # Vérifier si encodage nécessaire
+        # Si une piste a besoin de réencoder, on réencode toutes les pistes
         needs_audio_encode = False
         for idx in selected_tracks:
             track = info.audio_tracks[idx]
@@ -927,9 +920,9 @@ def transcode_file(src: Path, dst: Path, info: MediaInfo, args: argparse.Namespa
         if ideal_bitrate < args.vb:
             if args.adaptive_vb:
                 effective_vb = ideal_bitrate
-                logger.info(f'Using bitrate {effective_vb} kb/s instead of user defined {args.vb} kbps.')
+                logger.info(f'[--adaptive-vb]: Using bitrate {effective_vb} kb/s instead of user defined {args.vb} kb/s')
             else:
-                logger.warning(f'User defined bitrate ({args.vb}) higher than ideal (~ {effective_vb}). Process might result in a file larger than necessary. Consider using --adaptive-vb')
+                logger.warning(f'User defined bitrate ({args.vb} kb/s) higher than ideal ({ideal_bitrate} kb/s). Process might result in a file larger than necessary. Consider using --adaptive-vb')
 
     cmd = build_ffmpeg_command(src, dst, info, args, transcode_video, transcode_audio, effective_vb)
 
