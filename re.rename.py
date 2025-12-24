@@ -45,7 +45,7 @@ def prompt_pattern() -> re.Pattern:
     """Ask user for a regular‑expression pattern."""
     while True:
         pat_str = input(
-            "Enter regex pattern to match filenames\n.Example: ^(.*)\\.txt$\n"
+            "Enter regex pattern to match filenames.\nExample: ^(.*)\\.txt$\n"
         ).strip()
         if not pat_str:
             print("  [!] Pattern cannot be empty.")
