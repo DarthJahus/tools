@@ -1064,11 +1064,14 @@ def walk_source(args: argparse.Namespace, logger: Logger):
         # Check if already in done.txt
         if rel_path_str in done_set:
             if dst_file.exists():
-                logger.info(f"→ Already in done.txt, skipping")
+                logger.info(f"→ Already in done.txt. Skipping.")
                 stats['skipped_done'] += 1
                 continue
             else:
-                logger.warning(f"→ In done.txt but destination missing, will re-transcode")
+                logger.warning(f"→ In done.txt but destination missing. Skipping.")
+                # if in done.txt, always pass!
+                # ToDo: Some --param to override this?
+                continue
 
         # If destination exists but not in done.txt, will re-transcode
         if dst_file.exists() and rel_path_str not in done_set:
@@ -1196,7 +1199,7 @@ def main():
     parser.add_argument("--force-cbr", action="store_true", help="Force CBR encoding")
     parser.add_argument("--force-codec-video", action="store_true", help="Force video codec conversion even if source codec is lighter")
     parser.add_argument("--force-codec-audio", action="store_true", help="Force audio codec conversion even if source codec is lighter")
-    parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium', help="Encoding quality preset")
+    parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='very_high', help="Encoding quality preset")
     parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none', help="GPU acceleration")
     parser.add_argument("--skip-codec", choices=['h264', 'av1','h265','vp9'], action="append", default=[], help="Skip file when encoded with these codecs.")
     parser.add_argument("--only-codecs", choices=['av1','h265','vp9'], action="append", default=[], help="If present, only process files encoded with these codecs.")
