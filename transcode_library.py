@@ -576,9 +576,12 @@ def should_transcode(info: MediaInfo, args: argparse.Namespace, logger: Logger) 
     # ========================================================================
     # EXCEPTION: Skip certain codecs
     # ========================================================================
-    if info.video_codec in args.skip_codec:
-        # Whichever reasons, don't transcode the file.
+    if args.skip_codec and info.video_codec in args.skip_codec:
+        # Whichever reasons, don't transcode the file, because the codec is present in skipped codecs list (--skip-codecs).
         raise ShouldTranscodeError(f"File encoded with {info.video_codec}")
+    if args.only_codecs and info.video_codec not in args.only_codecs:
+        # Whichever reasons, don't transcode the file, because the codec is absent from allowed codecs list (--only-codecs).
+        raise ShouldTranscodeError(f"[--only-codecs] File encoded with {info.video_codec} (not {', neither'.join(args.only_codecs)}). Skipping.")
 
     # ========================================================================
     # VIDEO CHECKS
@@ -1195,7 +1198,8 @@ def main():
     parser.add_argument("--force-codec-audio", action="store_true", help="Force audio codec conversion even if source codec is lighter")
     parser.add_argument("--quality", choices=['low', 'medium', 'high', 'very_high'], default='medium', help="Encoding quality preset")
     parser.add_argument("--gpu", choices=['none', 'nvidia', 'amd'], default='none', help="GPU acceleration")
-    parser.add_argument("--skip-codec", choices=['av1','h265','vp9'], action="append", default=[], help="Skip file when encoded with these codecs.")
+    parser.add_argument("--skip-codec", choices=['h264', 'av1','h265','vp9'], action="append", default=[], help="Skip file when encoded with these codecs.")
+    parser.add_argument("--only-codecs", choices=['av1','h265','vp9'], action="append", default=[], help="If present, only process files encoded with these codecs.")
 
     # Behavior
     parser.add_argument("--dry-run", action="store_true", help="Simulate without actual transcoding")
@@ -1228,7 +1232,9 @@ def main():
     logger.info(f"Audio: {args.ac} @ {args.ab} kb/s")
     logger.info(f"Quality: {args.quality}, GPU: {args.gpu}, Force CBR: {args.force_cbr}")
     if args.skip_codec:
-        logger.info(f"Skip files with: {args.skip_codec}")
+        logger.info(f"Skip files with: {', '.join(args.skip_codec)}")
+    if args.only_codecs:
+        logger.info(f"Processing files encoded with: {', '.join(args.only_codecs)}")
     logger.info(f"Dry run: {args.dry_run}, Propagate: {args.propagate}")
 
     # Execute
