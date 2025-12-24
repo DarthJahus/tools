@@ -465,6 +465,8 @@ def compute_target_resolution(src_w, src_h, max_w, max_h):
     # Ratio d’origine
     src_ratio = src_w / src_h
 
+    target_w, target_h = None, None
+
     # On choisit le dimensionnement selon la contrainte la plus stricte
     if max_w is not None and max_h is not None:
         # Calcul des résolutions possibles
@@ -473,20 +475,22 @@ def compute_target_resolution(src_w, src_h, max_w, max_h):
 
         if w_based_h <= max_h:
             # Limite définie par la largeur
-            return max_w, w_based_h
+            target_w, target_h = max_w, w_based_h
         else:
             # Limite définie par la hauteur
-            return h_based_w, max_h
+            target_w, target_h = h_based_w, max_h
 
     elif max_w is not None:
         # Seulement limite largeur
         new_h = int(max_w / src_ratio)
-        return max_w, new_h
+        target_w, target_h = max_w, new_h
 
     else:
         # Seulement limite hauteur
         new_w = int(max_h * src_ratio)
-        return new_w, max_h
+        target_w, target_h = new_w, max_h
+
+    return target_w + (target_w % 2), target_h + (target_h % 2)
 
 
 def scale_bitrate_for_resolution(bitrate: int, source_w: int, source_h: int, target_w: int, target_h: int) -> int:
