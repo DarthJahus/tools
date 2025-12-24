@@ -370,10 +370,53 @@ def probe_video_bitrate_kb(input_file: Path, verbose: bool = False) -> int | Non
 
     return None
 
+
+def probe_colorimetry(input_file: Path):
+    """
+    Retourne un dict avec :
+    - pix_fmt
+    - color_space
+    - color_primaries
+    - color_transfer
+    - is_hdr (bool)
+    """
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=pix_fmt,color_space,color_primaries,color_transfer,color_range",
+        "-of", "json",
+        str(input_file)
+    ]
+    cp = run_cmd(cmd)
+    if cp.returncode != 0 or not cp.stdout:
+        return None
+
+    try:
+        data = json.loads(cp.stdout)
+        s = data["streams"][0]
+        pix_fmt = s.get("pix_fmt")
+        cs = s.get("color_space")
+        cp_ = s.get("color_primaries")
+        ct = s.get("color_transfer")
+        cr = s.get("color_range")
+
+        is_hdr = (ct == "smpte2084" or ct == "arib-std-b67")
+
+        return {
+            "pix_fmt": pix_fmt,
+            "color_space": cs,
+            "color_primaries": cp_,
+            "color_transfer": ct,
+            "is_hdr": is_hdr
+        }
+    except Exception:
+        return None
+
+
 # -------------------------
 # Build ffmpeg args
 # -------------------------
-def build_ffmpeg_args(encoder: str, quality: str, target_kb: int, input_file: Path, output_file: Path):
+def build_ffmpeg_args(encoder: str, quality: str, target_kb: int, input_file: Path, output_file: Path, color: dict, keep_hdr: bool):
     """
     Retourne la liste d'arguments pour ffmpeg (inclut mapping, audio, subs et output).
     target_kb is integer kb/s or None
@@ -386,12 +429,39 @@ def build_ffmpeg_args(encoder: str, quality: str, target_kb: int, input_file: Pa
         "-map_metadata:s:v", "-1"
     ]
 
+    if color and keep_hdr:
+        if color.get("pix_fmt"):
+            args += ["-pix_fmt", "p010le" if encoder == "amd" and color.get("is_hdr") else color["pix_fmt"]]
+
+        if color.get("color_space"):
+            args += ["-colorspace", color["color_space"]]
+
+        if color.get("color_primaries"):
+            args += ["-color_primaries", color["color_primaries"]]
+
+        if color.get("color_transfer"):
+            args += ["-color_trc", color["color_transfer"]]
+
+        if color.get("color_range"):
+            args += ["-color_range", color["color_range"]]
+
+    if not keep_hdr:
+        if color and color.get("is_hdr", False):
+            args += [
+                "-vf",
+                "zscale=t=linear:npl=100,tonemap=hable,"
+                "zscale=t=bt709:m=bt709:r=tv",
+                "-pix_fmt", "yuv420p",
+                "-colorspace", "bt709",
+                "-color_primaries", "bt709",
+                "-color_trc", "bt709"
+            ]
+
     if encoder == "amd":
         args += [
             "-c:v", "av1_amf",
             "-usage", "transcoding",
             "-quality", quality,
-            "-pix_fmt", "yuv420p"
         ]
         if target_kb:
             maxrate = int(round(target_kb * 1.1))
@@ -429,7 +499,7 @@ def build_ffmpeg_args(encoder: str, quality: str, target_kb: int, input_file: Pa
 # Process a single file
 # -------------------------
 def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
-                 archive_file: Path, check_archive: bool, encoder: str, quality: str, target_percent: float, error_log: str, verbose: bool = False, min_bitrate_kb: int = None, force_av1: bool = False):
+                 archive_file: Path, check_archive: bool, encoder: str, quality: str, target_percent: float, error_log: str, verbose: bool = False, min_bitrate_kb: int = None, force_av1: bool = False, keep_hdr = False):
     fname = file_path.name
 
     # Extraire l'ID YouTube s'il existe
@@ -476,6 +546,8 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
     # check codec and get bitrate info
     codec = probe_codec(file_path)
     src_kb = probe_video_bitrate_kb(file_path, verbose=verbose)
+    color = probe_colorimetry(file_path)
+
     # Vérifier le bitrate minimum si spécifié
     if min_bitrate_kb and src_kb:
         if src_kb < min_bitrate_kb:
@@ -529,7 +601,7 @@ def process_file(file_path: Path, out_dir: Path, done_path: Path, done_set: set,
 
     # build args and run ffmpeg
     ff_args = build_ffmpeg_args(encoder=encoder, quality=quality, target_kb=target_kb,
-                                input_file=file_path, output_file=output_file)
+                                input_file=file_path, output_file=output_file, color=color, keep_hdr=keep_hdr)
     try:
         # Affiche la commande complète pour le debug
         print()  # nouvelle ligne après le message de source
@@ -588,6 +660,8 @@ def main():
                         help="Bitrate minimum en kb/s (fichiers en-dessous ignorés, défaut: aucun minimum)")
     parser.add_argument("--force-av1", action="store_true",
                         help="Forcer la reconversion des fichiers déjà en AV1")
+    parser.add_argument("--keep-hdr", action="store_true",
+                        help="Conserve le HDR au lieu de convertir en SDR (tone-mapping)")
 
     args = parser.parse_args()
 
@@ -601,6 +675,7 @@ def main():
     verbose = args.verbose
     min_bitrate_kb = args.min_bitrate
     force_av1 = args.force_av1
+    keep_hdr = args.keep_hdr
 
     if not root.exists() or not root.is_dir():
         print(Fore.RED + f"Root folder introuvable: {root}" + Style.RESET_ALL)
@@ -622,6 +697,7 @@ def main():
         print(Fore.YELLOW + f"Bitrate minimum: {min_bitrate_kb} kb/s" + Style.RESET_ALL)
     print("")
     print(Fore.YELLOW + f"Forcer AV1     : {force_av1}" + Style.RESET_ALL)
+    print(Fore.YELLOW + f"Keep HDR       : {keep_hdr}")
 
     if not folders:
         print(Fore.YELLOW + "Aucun dossier à traiter." + Style.RESET_ALL)
@@ -674,7 +750,8 @@ def main():
                 error_log=error_log,
                 verbose=verbose,
                 min_bitrate_kb=min_bitrate_kb,
-                force_av1=force_av1
+                force_av1=force_av1,
+                keep_hdr=keep_hdr
             )
 
             if status in ("converted", "copied"):
