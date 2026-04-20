@@ -28,6 +28,10 @@ from pathlib import Path
 WARN_DURATION_S = 3600  # alert threshold for source duration
 
 
+def compute_output_fps(source_fps: float, speed: float) -> int:
+    return min(60, round(source_fps * speed))
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -37,13 +41,16 @@ def parse_args() -> argparse.Namespace:
         description="Merge Frigate MP4 segments into one monolithic recording."
     )
     p.add_argument("--root",   required=True,
-                   help="Root recordings directory (e.g. D:\\recordings)")
+                   help="Root recordings directory (e.g D:\\recordings)")
     p.add_argument("--camera", required=True,
                    help="Camera subfolder name (e.g. imou, xiaomi)")
     p.add_argument("--start",  required=True,
                    help="Start datetime: 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM:SS'")
     p.add_argument("--end",    required=True,
                    help="End datetime:   'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM:SS'")
+    p.add_argument("--source-fps", type=float, default=None,
+                   help="Source framerate (e.g. 15, 25, 30). "
+                        "Required when --speed != 1.0 to compute output FPS.")
     p.add_argument("--speed",  type=float, default=1.0,
                    help="Playback speed multiplier (default: 1.0 = real-time). "
                         "Speed=1 with no --encode-params uses stream copy (lossless).")
@@ -159,9 +166,10 @@ def confirm(prompt: str) -> bool:
 
 def build_command(ffmpeg: str, concat_list: str,
                   speed: float, encode_params: str | None,
-                  output: str) -> list[str]:
+                  output: str, source_fps: float) -> list[str]:
 
-    base = [ffmpeg, "-y",
+    base = [ffmpeg,
+            "-y",
             "-f", "concat", "-safe", "0",
             "-i", concat_list]
 
@@ -185,15 +193,18 @@ def build_command(ffmpeg: str, concat_list: str,
         codec_opts = ["-c:v", "libx264", "-preset", "fast", "-crf", "23",
                       "-c:a", "aac"]
 
-    return base + filter_opts + codec_opts + [output]
+    output_opts = []
+
+    if source_fps is not None and "-r " not in (encode_params or ""):
+        output_fps = compute_output_fps(source_fps, speed)
+        output_opts += ["-r", str(output_fps)]
+    elif "-vsync " not in (encode_params or ""):
+        output_opts += ["-vsync", "vfr"]
+
+    return base + filter_opts + codec_opts + output_opts + [output]
 
 
-def run_merge(ffmpeg: str, concat_list: str,
-              speed: float, encode_params: str | None,
-              output: str) -> None:
-
-    cmd = build_command(ffmpeg, concat_list, speed, encode_params, output)
-
+def run_merge(cmd) -> None:
     print("\n[ffmpeg command]")
     print(" ".join(f'"{c}"' if " " in c else c for c in cmd))
     print()
@@ -210,6 +221,10 @@ def run_merge(ffmpeg: str, concat_list: str,
 
 def main() -> None:
     args = parse_args()
+    if args.speed != 1.0 and args.source_fps is None:
+        print("Error: --source-fps is required when --speed != 1.0.", file=sys.stderr)
+        sys.exit(1)
+
     root  = Path(args.root)
     start = parse_dt(args.start)
     end   = parse_dt(args.end)
@@ -227,6 +242,11 @@ def main() -> None:
     print(f"Speed        : {args.speed}x")
     print(f"Encode params: {args.encode_params or '(default / stream copy)'}")
     print(f"Output       : {args.output}")
+    if args.speed != 1.0 and "-r " not in (args.encode_params or ""):
+        fps_out = compute_output_fps(args.source_fps, args.speed)
+        print(f"Output FPS   : {fps_out}  ({args.source_fps} × {args.speed}x, capped at 60)")
+    elif "-r " in (args.encode_params or ""):
+        print(f"Output FPS   : (from --encode-params)")
     print()
 
     segments = collect_segments(root, args.camera, start, end)
@@ -254,7 +274,15 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         concat_list = write_concat_list(segments, tmpdir)
-        run_merge(args.ffmpeg, concat_list, args.speed, args.encode_params, args.output)
+        run_merge(
+            build_command(
+                args.ffmpeg,
+                concat_list,
+                args.speed,
+                args.encode_params,
+                args.output,
+                args.source_fps)
+        )
 
     print(f"\nDone → {args.output}")
 
