@@ -26,6 +26,7 @@ from pathlib import Path
 
 
 WARN_DURATION_S = 3600  # alert threshold for source duration
+MUTE_ABOVE_SPEED = 4.0
 
 
 def compute_output_fps(source_fps: float, speed: float) -> int:
@@ -54,11 +55,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--speed",  type=float, default=1.0,
                    help="Playback speed multiplier (default: 1.0 = real-time). "
                         "Speed=1 with no --encode-params uses stream copy (lossless).")
+    p.add_argument("--no-mute", action="store_true",
+                   help=f"Keep audio even when speed > {MUTE_ABOVE_SPEED}x "
+                        f"(default: audio is muted above {MUTE_ABOVE_SPEED}x).")
     p.add_argument("--encode-params", default=None, metavar="PARAMS",
                    help="Arbitrary ffmpeg output params as a quoted string, e.g. "
                         '"-c:v libx264 -b:v 1000k -c:a aac". '
                         "Forces re-encode. Replaces default codec options entirely. "
-                        "Speed filters (setpts/atempo) are still applied when --speed != 1.")
+                        "Speed filters (setpts/atempo) are still applied when --speed != 1. "
+                        f"Note: audio is muted when speed > {MUTE_ABOVE_SPEED}x regardless "
+                        "of these params, unless --no-mute is set.")
     p.add_argument("--output", default="merged.mp4",
                    help="Output file path (default: merged.mp4)")
     p.add_argument("--ffmpeg", default="ffmpeg",
@@ -166,14 +172,16 @@ def confirm(prompt: str) -> bool:
 
 def build_command(ffmpeg: str, concat_list: str,
                   speed: float, encode_params: str | None,
-                  output: str, source_fps: float) -> list[str]:
+                  output: str, source_fps: float, no_mute: bool) -> list[str]:
 
     base = [ffmpeg,
             "-y",
             "-f", "concat", "-safe", "0",
+            "-fflags", "+genpts",
             "-i", concat_list]
 
     need_reencode = (encode_params is not None) or (speed != 1.0)
+    mute = (speed > MUTE_ABOVE_SPEED) and not no_mute
 
     if not need_reencode:
         # Stream copy — fastest, lossless
@@ -183,15 +191,22 @@ def build_command(ffmpeg: str, concat_list: str,
     filter_opts: list[str] = []
     if speed != 1.0:
         vf = f"setpts={1.0 / speed:.6f}*PTS"
-        af = build_atempo_chain(speed)
-        filter_opts = ["-vf", vf, "-af", af]
+        filter_opts = ["-vf", vf]
+        if not mute:
+            af = build_atempo_chain(speed)
+            filter_opts += ["-af", af]
 
     # Codec options: user-supplied or sensible defaults
     if encode_params is not None:
         codec_opts = shlex.split(encode_params)
+        if mute:
+            codec_opts += ["-an"]
     else:
-        codec_opts = ["-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                      "-c:a", "aac"]
+        codec_opts = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        if mute:
+            codec_opts += ["-an"]
+        else:
+            codec_opts += ["-c:a", "aac"]
 
     output_opts = []
 
@@ -240,6 +255,10 @@ def main() -> None:
     print(f"Camera       : {args.camera}")
     print(f"Range        : {start}  →  {end}")
     print(f"Speed        : {args.speed}x")
+    if args.no_mute:
+        print(f"Audio        : preserved")
+    elif args.speed > MUTE_ABOVE_SPEED:
+        print(f"Audio        : muted (speed {args.speed}x > {MUTE_ABOVE_SPEED})")
     print(f"Encode params: {args.encode_params or '(default / stream copy)'}")
     print(f"Output       : {args.output}")
     if args.speed != 1.0 and "-r " not in (args.encode_params or ""):
@@ -281,7 +300,9 @@ def main() -> None:
                 args.speed,
                 args.encode_params,
                 args.output,
-                args.source_fps)
+                args.source_fps,
+                args.no_mute,
+            )
         )
 
     print(f"\nDone → {args.output}")
