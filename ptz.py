@@ -165,14 +165,14 @@ class PTZWindow(QMainWindow):
         grid.setSpacing(3)
 
         DIRS = [
-            ("NW", 0, 0, -PAN_SPEED,  TILT_SPEED,  0),
-            ("N",  0, 1,  0,           TILT_SPEED,  0),
-            ("NE", 0, 2,  PAN_SPEED,   TILT_SPEED,  0),
-            ("W",  1, 0, -PAN_SPEED,   0,           0),
-            ("E",  1, 2,  PAN_SPEED,   0,           0),
-            ("SW", 2, 0, -PAN_SPEED,  -TILT_SPEED,  0),
-            ("S",  2, 1,  0,          -TILT_SPEED,  0),
-            ("SE", 2, 2,  PAN_SPEED,  -TILT_SPEED,  0),
+            ("↖", 0, 0, -PAN_SPEED,   TILT_SPEED,  0),
+            ("↑", 0, 1,  0,           TILT_SPEED,  0),
+            ("↗", 0, 2,  PAN_SPEED,   TILT_SPEED,  0),
+            ("←", 1, 0, -PAN_SPEED,   0,           0),
+            ("→", 1, 2,  PAN_SPEED,   0,           0),
+            ("↙", 2, 0, -PAN_SPEED,  -TILT_SPEED,  0),
+            ("↓", 2, 1,  0,          -TILT_SPEED,  0),
+            ("↘", 2, 2,  PAN_SPEED,  -TILT_SPEED,  0),
         ]
         for label, r, c, pan, tilt, zoom in DIRS:
             b = QPushButton(label)
@@ -181,7 +181,7 @@ class PTZWindow(QMainWindow):
             b.released.connect(self._on_stop)
             grid.addWidget(b, r, c)
 
-        stop_b = QPushButton("STOP")
+        stop_b = QPushButton("□")
         stop_b.setFixedSize(54, 40)
         stop_b.clicked.connect(self._on_stop)
         grid.addWidget(stop_b, 1, 1)
