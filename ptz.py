@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from json import JSONDecodeError
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QIcon, QKeyEvent, QPainter, QPixmap
@@ -19,14 +20,27 @@ from PyQt6.QtWidgets import (
 from onvif import ONVIFCamera
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CAM_CONF = json.loads(open('.secret/ptz.json', 'r', encoding='utf-8').read())
-CAM_HOST = CAM_CONF['CAM_HOST']
-CAM_PORT = CAM_CONF['CAM_PORT']
-CAM_USER = CAM_CONF['CAM_USER']
-CAM_PASS = CAM_CONF['CAM_PASS']
-PAN_SPEED  = 0.5
-TILT_SPEED = 0.5
-ZOOM_SPEED = 0.4
+try:
+    CAM_CONF = json.loads(open('.secret/ptz.json', 'r', encoding='utf-8').read())
+    CAM_HOST = CAM_CONF['CAM_HOST']
+    CAM_PORT = CAM_CONF['CAM_PORT']
+    CAM_USER = CAM_CONF['CAM_USER']
+    CAM_PASS = CAM_CONF['CAM_PASS']
+    PAN_SPEED = CAM_CONF.get('PAN_SPEED', 0.25)
+    TILT_SPEED = CAM_CONF.get('TILT_SPEED', 0.25)
+    ZOOM_SPEED = CAM_CONF.get('ZOOM_SPEED', 0.25)
+except FileNotFoundError:
+    print('Create ptz.json in folder .secret')
+    exit(1)
+except JSONDecodeError:
+    print('Make sure ptz.json is correctly formatted.')
+    exit(2)
+except KeyError:
+    print('Make sure ptz.json has all needed items: CAM_HOST, CAM_PORT, CAM_USER, CAM_PASS')
+    exit(2)
+except Exception as e:
+    print(f"{e.__class__}\n{str(e)}")
+    exit(3)
 
 
 # ── ONVIF ─────────────────────────────────────────────────────────────────────
@@ -253,7 +267,7 @@ class PTZWindow(QMainWindow):
         def _do():
             try:
                 self.ctrl.connect()
-                self._sig_status.emit("Connecte", "green")
+                self._sig_status.emit("Connecté", "green")
             except Exception:
                 self._sig_status.emit("Erreur", "red")
         threading.Thread(target=_do, daemon=True).start()
